@@ -14,5 +14,16 @@ En esta práctica se implementa una conexión cliente-servidor usando sockets de
 - Cliente.java: Clase que implementa el cliente de la aplicación.
 - README.md: Archivo de documentación del proyecto.
 
+# Funcionalidades requeridas para la práctica
+- El servidor debe ser capaz de manejar múltiples clientes simultáneamente utilizando hilos.
+- Los clientes deben poder enviar y recibir mensajes a través del servidor.
+- El servidor debe mantener un registro de los chats y los usuarios conectados.
+- El servidor almacena chats grupales con múltiples usuarios, donde se pueden enviar mensajes a todos los participantes del chat, videos, stickers, imágenes, etc.
+- Los clientes deben poder unirse a chats existentes o crear nuevos chats.
+- Los clientes pueden enviar mensajes privados a otros usuarios y estos también se almacenan en el servidor.
+
 # Requisitos
 - Java Development Kit (JDK) 8 o superior.  
+
+# Instrucciones para compilar y ejecutar
+
