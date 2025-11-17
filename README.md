@@ -12,6 +12,7 @@ En esta práctica se implementa una conexión cliente-servidor usando sockets de
 - Usuario.java: Clase que representa un usuario con su información. 
 - Servidor.java: Clase que implementa el servidor de la aplicación.
 - Cliente.java: Clase que implementa el cliente de la aplicación.
+- List_usuario.java: Clase que maneja la lista de usuarios conectados.
 - README.md: Archivo de documentación del proyecto.
 
 # Funcionalidades requeridas para la práctica
@@ -26,4 +27,15 @@ En esta práctica se implementa una conexión cliente-servidor usando sockets de
 - Java Development Kit (JDK) 8 o superior.  
 
 # Instrucciones para compilar y ejecutar
+
+## Windows
+
+- Compilar
+javac *.java
+
+- Ejecutar el servidor
+java Servidor_B
+
+- Ejecutar el cliente (en otra terminal)
+java Cliente_B
 

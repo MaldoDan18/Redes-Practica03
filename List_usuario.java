@@ -10,33 +10,47 @@ import java.util.ArrayList;
 
 public class List_usuario {
 
-    private List<Usuario> usuarios;
+    private final List<Usuario> usuarios;
 
     public List_usuario() {
         this.usuarios = new ArrayList<>();
     }
 
-    public void agregarUsuario(Usuario usuario) {
+    // Evita duplicados por id o nombre
+    public synchronized void agregarUsuario(Usuario usuario) {
+        if (usuario == null) return;
+        for (Usuario u : usuarios) {
+            if (u.getId() == usuario.getId() || u.getNombre().equalsIgnoreCase(usuario.getNombre())) {
+                return; // ya existe
+            }
+        }
         this.usuarios.add(usuario);
     }
 
-    public List<Usuario> getUsuarios() {
-        return usuarios;
+    public synchronized List<Usuario> getUsuarios() {
+        return new ArrayList<>(usuarios);
     }
 
     //Borrar la lista de usuarios una vez que el servidor se apague
-
-    public void clearUsuarios() {
+    public synchronized void clearUsuarios() {
         this.usuarios.clear();
     }
 
-    //Listar usuarios activos
-    public List<Usuario> listarUsuariosActivos() {
+    //Listar usuarios activos (devuelve copia)
+    public synchronized List<Usuario> listarUsuariosActivos() {
         return new ArrayList<>(this.usuarios);
     }
 
-    public int contarUsuarios() {
+    public synchronized int contarUsuarios() {
         return this.usuarios.size();
     }
 
+    // Obtener nombres para enviar al cliente
+    public synchronized List<String> listarNombres() {
+        List<String> names = new ArrayList<>();
+        for (Usuario u : usuarios) {
+            names.add(u.getNombre());
+        }
+        return names;
+    }
 }

@@ -38,4 +38,13 @@ public class Chat_Grupal {
     public String toString() {
         return "Chat_Grupal{name='" + nombre + "', miembros=" + miembros.size() + "}";
     }
+
+    // Devuelve lista de nombres (útil para enviar al cliente)
+    public synchronized List<String> listarNombresMiembros() {
+        List<String> names = new ArrayList<>();
+        for (Usuario u : miembros) {
+            names.add(u.getNombre());
+        }
+        return names;
+    }
 }
