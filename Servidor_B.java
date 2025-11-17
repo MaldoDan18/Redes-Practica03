@@ -9,7 +9,7 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
 
-public class Servidor {
+public class Servidor_B {
 	// Puerto del servidor
 	private static final int PORT = 5000;
 

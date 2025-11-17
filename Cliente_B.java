@@ -6,7 +6,7 @@ import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 
-public class Cliente {
+public class Cliente_B {
 	private static final String HOST = "localhost";
 	private static final int PORT = 5000;
 
@@ -14,7 +14,7 @@ public class Cliente {
 		try (SocketChannel client = SocketChannel.open()) {
 			client.connect(new InetSocketAddress(HOST, PORT));
 			System.out.println("Conectado al servidor " + safeRemoteAddress(client));
-			System.out.println("El servidor espera que escribas 'salir' para desconectar.");
+			System.out.println("Escribe una opción (1-4) o 'salir'. El servidor mostrará el menú al conectarte.");
 
 			// Hilo lector de respuestas del servidor
 			Thread reader = new Thread(() -> {
@@ -54,7 +54,7 @@ public class Cliente {
 				while (out.hasRemaining()) {
 					client.write(out);
 				}
-				if ("salir".equalsIgnoreCase(line.trim())) {
+				if ("salir".equalsIgnoreCase(line.trim()) || "4".equals(line.trim())) {
 					System.out.println("Has solicitado salir. Cerrando conexión...");
 					break;
 				}
