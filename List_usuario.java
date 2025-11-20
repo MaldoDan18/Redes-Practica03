@@ -53,4 +53,12 @@ public class List_usuario {
         }
         return names;
     }
+
+    // Nuevo: buscar usuario por id
+    public synchronized Usuario getUsuarioPorId(int id) {
+        for (Usuario u : usuarios) {
+            if (u.getId() == id) return u;
+        }
+        return null;
+    }
 }

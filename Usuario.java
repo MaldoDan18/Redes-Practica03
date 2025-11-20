@@ -45,6 +45,12 @@ public class Usuario {
         }
     }
 
+    // Nuevo: remover chat asociado
+    public synchronized void removerChat(Chat_Grupal chat) {
+        if (chat == null) return;
+        chatsAsociados.remove(chat);
+    }
+    
     public synchronized List<Chat_Grupal> getChatsAsociados() {
         return new ArrayList<>(chatsAsociados);
     }

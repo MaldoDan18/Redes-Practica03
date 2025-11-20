@@ -8,6 +8,8 @@ import java.nio.channels.SocketChannel;
 import java.nio.channels.CancelledKeyException;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.HashMap;
@@ -25,6 +27,21 @@ public class Servidor_B {
 	private static final List<Chat_Grupal> chats = new LinkedList<>();
 	private static final Map<SocketChannel, Usuario> socketToUsuario = new HashMap<>();
 	private static int nextUserId = 1000; // id incremental para usuarios clientes
+
+	// Estados interactivos por cliente
+	private static final Map<SocketChannel, String> pendingState = new HashMap<>();
+	private static final Map<SocketChannel, String> pendingTemp = new HashMap<>();
+	private static final String S_IDLE = "IDLE";
+	private static final String S_AWAIT_CREATE_IDS = "AWAIT_CREATE_IDS";
+	private static final String S_AWAIT_CREATE_NAME = "AWAIT_CREATE_NAME";
+	private static final String S_AWAIT_ENTER_CHAT = "AWAIT_ENTER_CHAT";
+	private static final String S_AWAIT_LEAVE_CHAT = "AWAIT_LEAVE_CHAT";
+	private static final String S_IN_CHAT = "IN_CHAT";
+
+	// Map de id usuario -> socket (si está conectado)
+	private static final Map<Integer, SocketChannel> userIdToSocket = new HashMap<>();
+
+	private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HH:mm:ss");
 
 	// Inicializadores de prueba (usuarios y chat grupal)
 	static {
@@ -96,9 +113,10 @@ public class Servidor_B {
 						int id = nextUserId++;
 						String defaultName = "user-" + id;
 						Usuario nuevo = new Usuario(defaultName, id);
-						// asegurarse de ids no colisionen (simple): usar nextUserId y luego incrementarlo
 						listaUsuarios.agregarUsuario(nuevo);
 						socketToUsuario.put(client, nuevo);
+						userIdToSocket.put(id, client);
+						pendingState.put(client, S_IDLE);
 
 						System.out.println("Conexión aceptada desde " + safeRemoteAddress(client) + " -> creado usuario " + nuevo.getNombre());
 
@@ -138,9 +156,190 @@ public class Servidor_B {
 
 							// obtener usuario asociado al socket
 							Usuario usuario = socketToUsuario.get(ch);
+							String state = pendingState.getOrDefault(ch, S_IDLE);
 
-							// Procesar comandos simples
-							if ("salir".equalsIgnoreCase(line) || "4".equals(line)) {
+							// Flujos interactivos primera prioridad
+							// Si está en modo de chat activo, tratamos las líneas como mensajes de chat
+							if (S_IN_CHAT.equals(state)) {
+								// MEN0 = volver al menu, no reenviar
+								if ("MEN0".equalsIgnoreCase(line.trim())) {
+									pendingState.put(ch, S_IDLE);
+									enqueueWrite(ch, writeMap, ByteBuffer.wrap(("Saliendo del chat. " + menuTexto()).getBytes(charset)));
+								} else {
+									// obtener chat actual del pendingTemp
+									String chatName = pendingTemp.get(ch);
+									if (chatName != null) {
+										Chat_Grupal current = null;
+										for (Chat_Grupal c : chats) if (c.getNombre().equalsIgnoreCase(chatName)) { current = c; break; }
+										if (current != null && usuario != null) {
+											String time = LocalTime.now().format(TIME_FMT);
+											String msg = usuario.getNombre() + " - [" + time + "] : " + line;
+											// Guardar en historial (sin \n)
+											current.addMessage(msg);
+											// difundir a todos los miembros conectados (incluye emisor)
+											for (Usuario member : current.getMiembros()) {
+												SocketChannel dest = userIdToSocket.get(member.getId());
+												if (dest != null && dest.isOpen()) {
+													enqueueWrite(dest, writeMap, ByteBuffer.wrap((msg + "\n").getBytes(charset)));
+													SelectionKey sk = dest.keyFor(selector);
+													if (sk != null) sk.interestOps(sk.interestOps() | SelectionKey.OP_WRITE);
+												}
+											}
+										} else {
+											enqueueWrite(ch, writeMap, ByteBuffer.wrap(("Chat no disponible: " + chatName + "\n").getBytes(charset)));
+											pendingState.put(ch, S_IDLE);
+										}
+									} else {
+										enqueueWrite(ch, writeMap, ByteBuffer.wrap("No hay chat activo.\n".getBytes(charset)));
+										pendingState.put(ch, S_IDLE);
+									}
+								}
+								SelectionKey ck0 = ch.keyFor(selector);
+								if (ck0 != null) ck0.interestOps(ck0.interestOps() | SelectionKey.OP_WRITE);
+								continue;
+							}
+
+							if (S_AWAIT_CREATE_IDS.equals(state)) {
+								// línea recibida: IDs separados por comas
+								pendingTemp.put(ch, line);
+								enqueueWrite(ch, writeMap, ByteBuffer.wrap("Escribe nombre del chat grupal:\n".getBytes(charset)));
+								pendingState.put(ch, S_AWAIT_CREATE_NAME);
+								SelectionKey ck = ch.keyFor(selector);
+								if (ck != null) ck.interestOps(ck.interestOps() | SelectionKey.OP_WRITE);
+								continue;
+							} else if (S_AWAIT_CREATE_NAME.equals(state)) {
+								// línea recibida: nombre del chat
+								String idsLine = pendingTemp.remove(ch);
+								String chatName = line;
+								Chat_Grupal nuevoChat = new Chat_Grupal(chatName);
+								if (idsLine != null && !idsLine.trim().isEmpty()) {
+									String[] parts = idsLine.split("[,\\s]+");
+									for (String p : parts) {
+										try {
+											int uid = Integer.parseInt(p.trim());
+											Usuario u = listaUsuarios.getUsuarioPorId(uid);
+											if (u != null) {
+												nuevoChat.agregarMiembro(u);
+											}
+										} catch (NumberFormatException ignore) {}
+									}
+								}
+								// Asegurar al menos agregar al creador
+								if (usuario != null) nuevoChat.agregarMiembro(usuario);
+								chats.add(nuevoChat);
+
+								// Notificar historial (nuevo chat vacío) y notificaciones de unión
+								// Crear notificación de unión del creador
+								String joinNotif = (usuario != null ? usuario.getNombre() : "usuario") + " se unió al chat";
+								// Guardar en historial
+								nuevoChat.addMessage(joinNotif);
+								// Enviar notificación a miembros conectados
+								for (Usuario member : nuevoChat.getMiembros()) {
+									SocketChannel dest = userIdToSocket.get(member.getId());
+									if (dest != null && dest.isOpen()) {
+										enqueueWrite(dest, writeMap, ByteBuffer.wrap((joinNotif + "\n").getBytes(charset)));
+										SelectionKey sk = dest.keyFor(selector);
+										if (sk != null) sk.interestOps(sk.interestOps() | SelectionKey.OP_WRITE);
+									}
+								}
+
+								StringBuilder out = new StringBuilder();
+								out.append("Chat creado: ").append(chatName).append("\nMiembros:\n");
+								for (String n : nuevoChat.listarNombresMiembros()) {
+									out.append("- ").append(n).append("\n");
+								}
+								out.append("Entrando al chat. Para volver al menu escribe MEN0\n");
+								enqueueWrite(ch, writeMap, ByteBuffer.wrap(out.toString().getBytes(charset)));
+								// entrar automáticamente al chat creado
+								pendingState.put(ch, S_IN_CHAT);
+								pendingTemp.put(ch, chatName);
+								SelectionKey ck = ch.keyFor(selector);
+								if (ck != null) ck.interestOps(ck.interestOps() | SelectionKey.OP_WRITE);
+								continue;
+							} else if (S_AWAIT_ENTER_CHAT.equals(state)) {
+								// Entrar a chat por nombre
+								String chatName = line;
+								Chat_Grupal target = null;
+								for (Chat_Grupal c : chats) if (c.getNombre().equalsIgnoreCase(chatName)) { target = c; break; }
+								if (target != null && usuario != null) {
+									target.agregarMiembro(usuario);
+
+									// 1) Enviar inmediatamente el historial al cliente que entra
+									List<String> history = target.getHistory();
+									if (!history.isEmpty()) {
+										for (String h : history) {
+											enqueueWrite(ch, writeMap, ByteBuffer.wrap((h + "\n").getBytes(charset)));
+										}
+									}
+
+									// 2) Enviar estado de presencia (debug) al cliente que entra
+									for (Usuario m : target.getMiembros()) {
+										boolean online = (userIdToSocket.get(m.getId()) != null && userIdToSocket.get(m.getId()).isOpen());
+										String pres = "DEBUG: " + m.getNombre() + (online ? " está en linea" : " está desconectado");
+										enqueueWrite(ch, writeMap, ByteBuffer.wrap((pres + "\n").getBytes(charset)));
+									}
+
+									// 3) Notificar a todos que este usuario se unió y guardar en historial
+									String joinNotif = usuario.getNombre() + " se unió al chat";
+									target.addMessage(joinNotif);
+									for (Usuario member : target.getMiembros()) {
+										SocketChannel dest = userIdToSocket.get(member.getId());
+										if (dest != null && dest.isOpen()) {
+											// evitar duplicado de notificación para el que ya recibió historial/presence?
+											enqueueWrite(dest, writeMap, ByteBuffer.wrap((joinNotif + "\n").getBytes(charset)));
+											SelectionKey sk = dest.keyFor(selector);
+											if (sk != null) sk.interestOps(sk.interestOps() | SelectionKey.OP_WRITE);
+										}
+									}
+
+									// 4) Informar al que entró y poner estado IN_CHAT
+									StringBuilder out = new StringBuilder();
+									out.append("Te has unido a ").append(target.getNombre()).append("\nMiembros:\n");
+									for (String n : target.listarNombresMiembros()) out.append("- ").append(n).append("\n");
+									out.append("Entrando al chat. Para volver al menu escribe MEN0\n");
+									enqueueWrite(ch, writeMap, ByteBuffer.wrap(out.toString().getBytes(charset)));
+
+									// poner estado IN_CHAT
+									pendingState.put(ch, S_IN_CHAT);
+									pendingTemp.put(ch, target.getNombre());
+								} else {
+									enqueueWrite(ch, writeMap, ByteBuffer.wrap(("Chat no encontrado: " + chatName + "\n").getBytes(charset)));
+									// sólo volver a IDLE si no se encontró el chat
+									pendingState.put(ch, S_IDLE);
+								}
+								SelectionKey ck = ch.keyFor(selector);
+								if (ck != null) ck.interestOps(ck.interestOps() | SelectionKey.OP_WRITE);
+								continue;
+							} else if (S_AWAIT_LEAVE_CHAT.equals(state)) {
+								// Salir de chat por nombre
+								String chatName = line;
+								Chat_Grupal target = null;
+								for (Chat_Grupal c : chats) if (c.getNombre().equalsIgnoreCase(chatName)) { target = c; break; }
+								if (target != null && usuario != null) {
+									target.eliminarMiembro(usuario);
+									String leaveNotif = usuario.getNombre() + " ha salido del chat";
+									// guardar en historial y notificar
+									target.addMessage(leaveNotif);
+									for (Usuario member : target.getMiembros()) {
+										SocketChannel dest = userIdToSocket.get(member.getId());
+										if (dest != null && dest.isOpen()) {
+											enqueueWrite(dest, writeMap, ByteBuffer.wrap((leaveNotif + "\n").getBytes(charset)));
+											SelectionKey sk = dest.keyFor(selector);
+											if (sk != null) sk.interestOps(sk.interestOps() | SelectionKey.OP_WRITE);
+										}
+									}
+									enqueueWrite(ch, writeMap, ByteBuffer.wrap(("Has salido de " + target.getNombre() + "\n").getBytes(charset)));
+								} else {
+									enqueueWrite(ch, writeMap, ByteBuffer.wrap(("Chat no encontrado: " + chatName + "\n").getBytes(charset)));
+								}
+								pendingState.put(ch, S_IDLE);
+								SelectionKey ck = ch.keyFor(selector);
+								if (ck != null) ck.interestOps(ck.interestOps() | SelectionKey.OP_WRITE);
+								continue;
+							}
+
+							// Procesar comandos simples cuando está en IDLE
+							if ("salir".equalsIgnoreCase(line) || "5".equals(line)) {
 								enqueueWrite(ch, writeMap, ByteBuffer.wrap("Adios!\n".getBytes(charset)));
 								SelectionKey ck = ch.keyFor(selector);
 								if (ck != null) ck.interestOps(ck.interestOps() | SelectionKey.OP_WRITE);
@@ -155,16 +354,16 @@ public class Servidor_B {
 									enqueueWrite(ch, writeMap, ByteBuffer.wrap("No hay usuarios.\n".getBytes(charset)));
 								} else {
 									StringBuilder out = new StringBuilder();
-									out.append("Usuarios:\n");
-									for (String n : nombres) {
-										out.append("- ").append(n).append("\n");
+									out.append("Usuarios (id - nombre):\n");
+									for (Usuario u : listaUsuarios.listarUsuariosActivos()) {
+										out.append(u.getId()).append(" - ").append(u.getNombre()).append("\n");
 									}
 									enqueueWrite(ch, writeMap, ByteBuffer.wrap(out.toString().getBytes(charset)));
 								}
 								SelectionKey ck = ch.keyFor(selector);
 								if (ck != null) ck.interestOps(ck.interestOps() | SelectionKey.OP_WRITE);
 							} else if ("2".equals(line)) {
-								// listar chats
+								// listar chats disponibles
 								if (chats.isEmpty()) {
 									enqueueWrite(ch, writeMap, ByteBuffer.wrap("No hay chats disponibles.\n".getBytes(charset)));
 								} else {
@@ -178,23 +377,38 @@ public class Servidor_B {
 								SelectionKey ck = ch.keyFor(selector);
 								if (ck != null) ck.interestOps(ck.interestOps() | SelectionKey.OP_WRITE);
 							} else if ("3".equals(line)) {
-								// Unirse al primer chat de prueba si existe
-								if (!chats.isEmpty()) {
-									Chat_Grupal target = chats.get(0);
-									if (usuario != null) {
-										target.agregarMiembro(usuario);
-										StringBuilder out = new StringBuilder();
-										out.append("Te has unido a ").append(target.getNombre()).append("\nMiembros:\n");
-										for (String n : target.listarNombresMiembros()) {
-											out.append("- ").append(n).append("\n");
-										}
-										enqueueWrite(ch, writeMap, ByteBuffer.wrap(out.toString().getBytes(charset)));
-									} else {
-										enqueueWrite(ch, writeMap, ByteBuffer.wrap("Usuario no registrado en servidor.\n".getBytes(charset)));
-									}
-								} else {
-									enqueueWrite(ch, writeMap, ByteBuffer.wrap("No hay chats a los que unirse.\n".getBytes(charset)));
+								// Crear chat grupal: enviar lista de usuarios y pedir IDs
+								StringBuilder out = new StringBuilder();
+								out.append("Crear chat - lista de usuarios (id - nombre):\n");
+								for (Usuario u : listaUsuarios.listarUsuariosActivos()) {
+									out.append(u.getId()).append(" - ").append(u.getNombre()).append("\n");
 								}
+								out.append("Escribe los IDs separados por comas (puedes incluirte):\n");
+								enqueueWrite(ch, writeMap, ByteBuffer.wrap(out.toString().getBytes(charset)));
+								pendingState.put(ch, S_AWAIT_CREATE_IDS);
+								SelectionKey ck = ch.keyFor(selector);
+								if (ck != null) ck.interestOps(ck.interestOps() | SelectionKey.OP_WRITE);
+							} else if ("4".equals(line)) {
+								// Listar los chats a los que pertenece y pedir nombre para entrar
+								if (usuario == null) {
+									enqueueWrite(ch, writeMap, ByteBuffer.wrap("Usuario no registrado.\n".getBytes(charset)));
+								} else {
+									List<Chat_Grupal> mine = usuario.getChatsAsociados();
+									StringBuilder out = new StringBuilder();
+									out.append("Tus chats:\n");
+									for (Chat_Grupal c : mine) {
+										out.append("- ").append(c.getNombre()).append("\n");
+									}
+									out.append("Si quieres entrar a un chat (o crearlo con opción 3), escribe el nombre del chat ahora:\n");
+									enqueueWrite(ch, writeMap, ByteBuffer.wrap(out.toString().getBytes(charset)));
+									pendingState.put(ch, S_AWAIT_ENTER_CHAT);
+								}
+								SelectionKey ck = ch.keyFor(selector);
+								if (ck != null) ck.interestOps(ck.interestOps() | SelectionKey.OP_WRITE);
+							} else if ("6".equals(line)) {
+								// Salir de un chat grupal: pedir nombre
+								enqueueWrite(ch, writeMap, ByteBuffer.wrap("Escribe el nombre del chat del que quieres salir:\n".getBytes(charset)));
+								pendingState.put(ch, S_AWAIT_LEAVE_CHAT);
 								SelectionKey ck = ch.keyFor(selector);
 								if (ck != null) ck.interestOps(ck.interestOps() | SelectionKey.OP_WRITE);
 							} else {
@@ -253,8 +467,10 @@ public class Servidor_B {
 		m.append("Menu:\n");
 		m.append("1 - Listar usuarios\n");
 		m.append("2 - Listar chats\n");
-		m.append("3 - Unirse al chat de prueba\n");
-		m.append("4 - Salir\n");
+		m.append("3 - Crear chat grupal\n");
+		m.append("4 - Listar mis chats y entrar\n");
+		m.append("6 - Salir de chat grupal\n");
+		m.append("5 - Salir\n");
 		m.append("Escribe una opción:\n");
 		return m.toString();
 	}
@@ -274,7 +490,27 @@ public class Servidor_B {
 			if (key != null) key.cancel();
 			readMap.remove(ch);
 			writeMap.remove(ch);
-			socketToUsuario.remove(ch);
+			Usuario u = socketToUsuario.remove(ch);
+			if (u != null) {
+				// marcar como desconectado en el registro global
+				u.setActive(false);
+				userIdToSocket.remove(u.getId());
+				// Notificar a los chats de este usuario que está desconectado (debug)
+				for (Chat_Grupal c : u.getChatsAsociados()) {
+					String off = "DEBUG: " + u.getNombre() + " se ha desconectado";
+					c.addMessage(off);
+					for (Usuario member : c.getMiembros()) {
+						SocketChannel dest = userIdToSocket.get(member.getId());
+						if (dest != null && dest.isOpen()) {
+							enqueueWrite(dest, writeMap, ByteBuffer.wrap((off + "\n").getBytes(StandardCharsets.UTF_8)));
+							SelectionKey sk = dest.keyFor(key.selector());
+							if (sk != null) sk.interestOps(sk.interestOps() | SelectionKey.OP_WRITE);
+						}
+					}
+				}
+			}
+			pendingState.remove(ch);
+			pendingTemp.remove(ch);
 			ch.close();
 		} catch (IOException e) {
 			// ignore

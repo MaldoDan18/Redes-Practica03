@@ -13,10 +13,13 @@ public class Chat_Grupal {
 
     private final String nombre;
     private final List<Usuario> miembros;
+    // Nuevo: historial de mensajes (mensajes ya formateados)
+    private final List<String> history;
 
     public Chat_Grupal(String nombre) {
         this.nombre = nombre;
         this.miembros = new ArrayList<>();
+        this.history = new ArrayList<>();
     }
 
     public String getNombre() {
@@ -27,6 +30,15 @@ public class Chat_Grupal {
         if (u != null && !miembros.contains(u)) {
             miembros.add(u);
             u.agregarChat(this);
+        }
+    }
+
+    // Nuevo: eliminar miembro
+    public synchronized void eliminarMiembro(Usuario u) {
+        if (u == null) return;
+        if (miembros.remove(u)) {
+            // mantener consistencia en el usuario
+            u.removerChat(this);
         }
     }
 
@@ -46,5 +58,16 @@ public class Chat_Grupal {
             names.add(u.getNombre());
         }
         return names;
+    }
+
+    // Nuevo: añadir mensaje al historial (mensajes ya formateados sin \n)
+    public synchronized void addMessage(String msg) {
+        if (msg == null) return;
+        history.add(msg);
+    }
+
+    // Nuevo: obtener copia del historial
+    public synchronized List<String> getHistory() {
+        return new ArrayList<>(history);
     }
 }
