@@ -171,36 +171,6 @@ public class Cliente_B {
 		return sb.length() > 0 ? sb.toString() : null;
 	}
 
-	// Modificado/omitido para no duplicar: mantenemos readAndPrintLines sin usar
-	private static String readAndPrintLines(SocketChannel client) throws IOException {
-		// ...existing code kept for compatibility (no-op usage)...
-		ByteBuffer buf = ByteBuffer.allocate(2048);
-		StringBuilder sb = new StringBuilder();
-		StringBuilder printedLines = new StringBuilder();
-		while (true) {
-			buf.clear();
-			int r = client.read(buf);
-			if (r == -1) {
-				System.out.println("Servidor cerró la conexión.");
-				throw new IOException("Conexión cerrada por servidor");
-			} else if (r > 0) {
-				buf.flip();
-				sb.append(StandardCharsets.UTF_8.decode(buf).toString());
-				int idx;
-				boolean printed = false;
-				while ((idx = sb.indexOf("\n")) != -1) {
-					String line = sb.substring(0, idx).trim();
-					sb.delete(0, idx + 1);
-					System.out.println("Servidor: " + line);
-					printedLines.append(line).append("\n");
-					printed = true;
-				}
-				if (printed) break;
-			}
-		}
-		return printedLines.toString();
-	}
-
 	private static String safeRemoteAddress(SocketChannel ch) {
 		try {
 			return ch.getRemoteAddress().toString();
