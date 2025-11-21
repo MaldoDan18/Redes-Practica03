@@ -41,6 +41,9 @@ public class Servidor_B {
 	// Map de id usuario -> socket (si está conectado)
 	private static final Map<Integer, SocketChannel> userIdToSocket = new HashMap<>();
 
+	// Nuevo: contador de mensajes no leídos por chatName -> (userId -> count)
+	private static final Map<String, Map<Integer, Integer>> unreadCounts = new HashMap<>();
+
 	private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HH:mm:ss");
 
 	// Inicializadores de prueba (usuarios y chat grupal)
@@ -154,7 +157,6 @@ public class Servidor_B {
 							sb.delete(0, idx + 1);
 							System.out.println("[" + safeRemoteAddress(ch) + "] " + line);
 
-							// obtener usuario asociado al socket
 							Usuario usuario = socketToUsuario.get(ch);
 							String state = pendingState.getOrDefault(ch, S_IDLE);
 
@@ -163,7 +165,9 @@ public class Servidor_B {
 							if (S_IN_CHAT.equals(state)) {
 								// MEN0 = volver al menu, no reenviar
 								if ("MEN0".equalsIgnoreCase(line.trim())) {
+									// quitar temp para que deje de recibir broadcasts
 									pendingState.put(ch, S_IDLE);
+									pendingTemp.remove(ch);
 									enqueueWrite(ch, writeMap, ByteBuffer.wrap(("Saliendo del chat. " + menuTexto()).getBytes(charset)));
 								} else {
 									// obtener chat actual del pendingTemp
@@ -176,18 +180,17 @@ public class Servidor_B {
 											String msg = usuario.getNombre() + " - [" + time + "] : " + line;
 											// Guardar en historial (sin \n)
 											current.addMessage(msg);
-											// difundir a todos los miembros conectados (incluye emisor)
+											// difundir a todos los miembros conectados:
 											for (Usuario member : current.getMiembros()) {
 												SocketChannel dest = userIdToSocket.get(member.getId());
-												if (dest != null && dest.isOpen()) {
-													enqueueWrite(dest, writeMap, ByteBuffer.wrap((msg + "\n").getBytes(charset)));
-													SelectionKey sk = dest.keyFor(selector);
-													if (sk != null) sk.interestOps(sk.interestOps() | SelectionKey.OP_WRITE);
-												}
+												// usa helper: si el miembro está "en el chat" recibe el mensaje completo,
+												// si no lo está, se incrementa el contador y recibe sólo la notificación con la cuenta.
+												sendOrNotify(dest, member.getId(), chatName, msg, writeMap, charset, selector);
 											}
 										} else {
 											enqueueWrite(ch, writeMap, ByteBuffer.wrap(("Chat no disponible: " + chatName + "\n").getBytes(charset)));
 											pendingState.put(ch, S_IDLE);
+											pendingTemp.remove(ch);
 										}
 									} else {
 										enqueueWrite(ch, writeMap, ByteBuffer.wrap("No hay chat activo.\n".getBytes(charset)));
@@ -228,6 +231,14 @@ public class Servidor_B {
 								if (usuario != null) nuevoChat.agregarMiembro(usuario);
 								chats.add(nuevoChat);
 
+								// inicializar contador unread para este chat
+								synchronized (unreadCounts) {
+									unreadCounts.put(nuevoChat.getNombre(), new HashMap<>());
+									for (Usuario m : nuevoChat.getMiembros()) {
+										unreadCounts.get(nuevoChat.getNombre()).put(m.getId(), 0);
+									}
+								}
+
 								// Notificar historial (nuevo chat vacío) y notificaciones de unión
 								// Crear notificación de unión del creador
 								String joinNotif = (usuario != null ? usuario.getNombre() : "usuario") + " se unió al chat";
@@ -236,11 +247,7 @@ public class Servidor_B {
 								// Enviar notificación a miembros conectados
 								for (Usuario member : nuevoChat.getMiembros()) {
 									SocketChannel dest = userIdToSocket.get(member.getId());
-									if (dest != null && dest.isOpen()) {
-										enqueueWrite(dest, writeMap, ByteBuffer.wrap((joinNotif + "\n").getBytes(charset)));
-										SelectionKey sk = dest.keyFor(selector);
-										if (sk != null) sk.interestOps(sk.interestOps() | SelectionKey.OP_WRITE);
-									}
+									sendOrNotify(dest, member.getId(), nuevoChat.getNombre(), joinNotif, writeMap, charset, selector);
 								}
 
 								StringBuilder out = new StringBuilder();
@@ -264,6 +271,12 @@ public class Servidor_B {
 								if (target != null && usuario != null) {
 									target.agregarMiembro(usuario);
 
+									// asegurar que existan contadores
+									synchronized (unreadCounts) {
+										unreadCounts.putIfAbsent(target.getNombre(), new HashMap<>());
+										unreadCounts.get(target.getNombre()).putIfAbsent(usuario.getId(), 0);
+									}
+
 									// 1) Enviar inmediatamente el historial al cliente que entra
 									List<String> history = target.getHistory();
 									if (!history.isEmpty()) {
@@ -284,12 +297,7 @@ public class Servidor_B {
 									target.addMessage(joinNotif);
 									for (Usuario member : target.getMiembros()) {
 										SocketChannel dest = userIdToSocket.get(member.getId());
-										if (dest != null && dest.isOpen()) {
-											// evitar duplicado de notificación para el que ya recibió historial/presence?
-											enqueueWrite(dest, writeMap, ByteBuffer.wrap((joinNotif + "\n").getBytes(charset)));
-											SelectionKey sk = dest.keyFor(selector);
-											if (sk != null) sk.interestOps(sk.interestOps() | SelectionKey.OP_WRITE);
-										}
+										sendOrNotify(dest, member.getId(), target.getNombre(), joinNotif, writeMap, charset, selector);
 									}
 
 									// 4) Informar al que entró y poner estado IN_CHAT
@@ -299,12 +307,24 @@ public class Servidor_B {
 									out.append("Entrando al chat. Para volver al menu escribe MEN0\n");
 									enqueueWrite(ch, writeMap, ByteBuffer.wrap(out.toString().getBytes(charset)));
 
+									// enviar notificación de mensajes no leídos (si hay) y resetear contador
+									int unread = 0;
+									synchronized (unreadCounts) {
+										Map<Integer,Integer> m = unreadCounts.get(target.getNombre());
+										if (m != null) {
+											unread = m.getOrDefault(usuario.getId(), 0);
+											if (unread > 0) {
+												enqueueWrite(ch, writeMap, ByteBuffer.wrap(("Notificación: " + unread + " mensaje(s) nuevos en " + target.getNombre() + "\n").getBytes(charset)));
+												m.put(usuario.getId(), 0);
+											}
+										}
+									}
+
 									// poner estado IN_CHAT
 									pendingState.put(ch, S_IN_CHAT);
 									pendingTemp.put(ch, target.getNombre());
 								} else {
 									enqueueWrite(ch, writeMap, ByteBuffer.wrap(("Chat no encontrado: " + chatName + "\n").getBytes(charset)));
-									// sólo volver a IDLE si no se encontró el chat
 									pendingState.put(ch, S_IDLE);
 								}
 								SelectionKey ck = ch.keyFor(selector);
@@ -522,6 +542,37 @@ public class Servidor_B {
 			return ch.getRemoteAddress().toString();
 		} catch (IOException e) {
 			return "desconocido";
+		}
+	}
+
+	// Helper: envía el mensaje completo si el destinatario está actualmente dentro del chat,
+	// en caso contrario incrementa el contador unread y envía una notificación con la cuenta.
+	private static void sendOrNotify(SocketChannel dest, int memberId, String chatName, String fullMsg, Map<SocketChannel, Queue<ByteBuffer>> writeMap, Charset charset, Selector selector) {
+		// destinatario conectado y en el chat?
+		if (dest != null && dest.isOpen()) {
+			String destState = pendingState.get(dest);
+			String destChat = pendingTemp.get(dest);
+			if (S_IN_CHAT.equals(destState) && destChat != null && destChat.equalsIgnoreCase(chatName)) {
+				enqueueWrite(dest, writeMap, ByteBuffer.wrap((fullMsg + "\n").getBytes(charset)));
+				SelectionKey sk = dest.keyFor(selector);
+				if (sk != null) sk.interestOps(sk.interestOps() | SelectionKey.OP_WRITE);
+				return;
+			}
+		}
+		// no está "viendo" el chat: aumentar contador y enviar notificación con nuevo total si está conectado
+		synchronized (unreadCounts) {
+			unreadCounts.putIfAbsent(chatName, new HashMap<>());
+			Map<Integer,Integer> counts = unreadCounts.get(chatName);
+			int cnt = counts.getOrDefault(memberId, 0) + 1;
+			counts.put(memberId, cnt);
+			// si el destinatario está conectado, enviar notificación con la cuenta actual
+			SocketChannel d = userIdToSocket.get(memberId);
+			if (d != null && d.isOpen()) {
+				String note = "Notificación: " + cnt + " mensaje(s) nuevo(s) en " + chatName;
+				enqueueWrite(d, writeMap, ByteBuffer.wrap((note + "\n").getBytes(charset)));
+				SelectionKey sk = d.keyFor(selector);
+				if (sk != null) sk.interestOps(sk.interestOps() | SelectionKey.OP_WRITE);
+			}
 		}
 	}
 }
