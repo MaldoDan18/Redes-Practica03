@@ -36,6 +36,8 @@ public class Servidor_B {
 	private static final String S_AWAIT_CREATE_NAME = "AWAIT_CREATE_NAME";
 	private static final String S_AWAIT_ENTER_CHAT = "AWAIT_ENTER_CHAT";
 	private static final String S_AWAIT_LEAVE_CHAT = "AWAIT_LEAVE_CHAT";
+	// Nuevo: esperar id para chat privado
+	private static final String S_AWAIT_PRIVATE_ID = "AWAIT_PRIVATE_ID";
 	private static final String S_IN_CHAT = "IN_CHAT";
 
 	// Map de id usuario -> socket (si está conectado)
@@ -169,6 +171,33 @@ public class Servidor_B {
 									pendingState.put(ch, S_IDLE);
 									pendingTemp.remove(ch);
 									enqueueWrite(ch, writeMap, ByteBuffer.wrap(("Saliendo del chat. " + menuTexto()).getBytes(charset)));
+								} else if ("PRIV0".equalsIgnoreCase(line.trim())) {
+									// iniciar flujo para crear chat privado desde el chat grupal actual
+									String currentChat = pendingTemp.get(ch);
+									if (currentChat != null) {
+										Chat_Grupal current = null;
+										for (Chat_Grupal c : chats) if (c.getNombre().equalsIgnoreCase(currentChat)) { current = c; break; }
+										if (current != null) {
+											// listar miembros en linea (excepto el propio)
+											StringBuilder out = new StringBuilder();
+											out.append("Miembros activos en ").append(current.getNombre()).append(" (id - nombre):\n");
+											for (Usuario m : current.getMiembros()) {
+												SocketChannel sck = userIdToSocket.get(m.getId());
+												if (m.getId() != usuario.getId() && sck != null && sck.isOpen()) {
+													out.append(m.getId()).append(" - ").append(m.getNombre()).append("\n");
+												}
+											}
+											out.append("Escribe el ID del usuario para crear chat privado:\n");
+											enqueueWrite(ch, writeMap, ByteBuffer.wrap(out.toString().getBytes(charset)));
+											// marcar que estamos esperando ID para privado, y guardar origen para filtrar
+											pendingState.put(ch, S_AWAIT_PRIVATE_ID);
+											pendingTemp.put(ch, "FROMCHAT:" + current.getNombre());
+										} else {
+											enqueueWrite(ch, writeMap, ByteBuffer.wrap(("Chat no disponible: " + currentChat + "\n").getBytes(charset)));
+										}
+									} else {
+										enqueueWrite(ch, writeMap, ByteBuffer.wrap("No hay chat activo para PRIV0.\n".getBytes(charset)));
+									}
 								} else {
 									// obtener chat actual del pendingTemp
 									String chatName = pendingTemp.get(ch);
@@ -183,8 +212,6 @@ public class Servidor_B {
 											// difundir a todos los miembros conectados:
 											for (Usuario member : current.getMiembros()) {
 												SocketChannel dest = userIdToSocket.get(member.getId());
-												// usa helper: si el miembro está "en el chat" recibe el mensaje completo,
-												// si no lo está, se incrementa el contador y recibe sólo la notificación con la cuenta.
 												sendOrNotify(dest, member.getId(), chatName, msg, writeMap, charset, selector);
 											}
 										} else {
@@ -389,8 +416,9 @@ public class Servidor_B {
 									enqueueWrite(ch, writeMap, ByteBuffer.wrap("No hay chats disponibles.\n".getBytes(charset)));
 								} else {
 									StringBuilder out = new StringBuilder();
-									out.append("Chats:\n");
+									out.append("Chats públicos:\n");
 									for (Chat_Grupal c : chats) {
+										if (c.isPrivado()) continue; // ocultar privados en listado público
 										out.append("- ").append(c.getNombre()).append(" (miembros: ").append(c.getMiembros().size()).append(")\n");
 									}
 									enqueueWrite(ch, writeMap, ByteBuffer.wrap(out.toString().getBytes(charset)));
@@ -430,6 +458,12 @@ public class Servidor_B {
 								// Salir de un chat grupal: pedir nombre
 								enqueueWrite(ch, writeMap, ByteBuffer.wrap("Escribe el nombre del chat del que quieres salir:\n".getBytes(charset)));
 								pendingState.put(ch, S_AWAIT_LEAVE_CHAT);
+								SelectionKey ck = ch.keyFor(selector);
+								if (ck != null) ck.interestOps(ck.interestOps() | SelectionKey.OP_WRITE);
+							} else if ("7".equals(line)) {
+								// Enviar mensaje privado: pedir ID de usuario
+								enqueueWrite(ch, writeMap, ByteBuffer.wrap("Escribe el ID del usuario al que quieres enviar un mensaje privado:\n".getBytes(charset)));
+								pendingState.put(ch, S_AWAIT_PRIVATE_ID);
 								SelectionKey ck = ch.keyFor(selector);
 								if (ck != null) ck.interestOps(ck.interestOps() | SelectionKey.OP_WRITE);
 							} else {
@@ -483,6 +517,7 @@ public class Servidor_B {
 		}
 	}
 
+	// Ajuste: agregar opción 7 al texto del menú
 	private static String menuTexto() {
 		StringBuilder m = new StringBuilder();
 		m.append("Menu:\n");
@@ -491,6 +526,7 @@ public class Servidor_B {
 		m.append("3 - Crear chat grupal\n");
 		m.append("4 - Listar mis chats y entrar\n");
 		m.append("6 - Salir de chat grupal\n");
+		m.append("7 - Enviar mensaje privado a usuario (nuevo)\n");
 		m.append("5 - Salir\n");
 		m.append("Escribe una opción:\n");
 		return m.toString();

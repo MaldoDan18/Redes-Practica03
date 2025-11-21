@@ -17,7 +17,8 @@ public class Cliente_B {
 		try (SocketChannel client = SocketChannel.open()) {
 			client.connect(new InetSocketAddress(HOST, PORT));
 			System.out.println("Conectado al servidor " + safeRemoteAddress(client));
-			System.out.println("Escribe una opción (1-6) o 'salir'. (5 o 'salir' cierra la conexión). El servidor mostrará el menú al conectarte.");
+			// incluir opción 7 en la ayuda inicial
+			System.out.println("Escribe una opción (1-7) o 'salir'. (5 o 'salir' cierra la conexión). El servidor mostrará el menú al conectarte.");
 
 			// Nuevo: cola para recibir líneas desde el hilo lector
 			BlockingQueue<String> incoming = new LinkedBlockingQueue<>();
@@ -37,7 +38,7 @@ public class Cliente_B {
 						System.out.println("DEBUG: Opción seleccionada -> 1 (Listar usuarios)");
 						break;
 					case "2":
-						System.out.println("DEBUG: Opción seleccionada -> 2 (Listar chats)");
+						System.out.println("DEBUG: Opción seleccionada -> 2 (Listar chats públicos)");
 						break;
 					case "3":
 						System.out.println("DEBUG: Opción seleccionada -> 3 (Crear chat grupal)");
@@ -48,6 +49,9 @@ public class Cliente_B {
 					case "6":
 						System.out.println("DEBUG: Opción seleccionada -> 6 (Salir de chat grupal)");
 						break;
+					case "7":
+						System.out.println("DEBUG: Opción seleccionada -> 7 (Enviar mensaje privado a usuario)");
+						break;
 					case "5":
 						System.out.println("DEBUG: Opción seleccionada -> 5 (Salir del servidor)");
 						break;
@@ -57,6 +61,8 @@ public class Cliente_B {
 					default:
 						if ("men0".equalsIgnoreCase(opt)) {
 							System.out.println("DEBUG: Comando de chat -> MEN0 (volver al menú)");
+						} else if ("priv0".equalsIgnoreCase(opt)) {
+							System.out.println("DEBUG: Comando de chat -> PRIV0 (iniciar chat privado con miembro del grupo)");
 						} else {
 							System.out.println("DEBUG: Mensaje libre/entrada -> " + opt);
 						}
