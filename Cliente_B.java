@@ -1,13 +1,17 @@
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.Base64;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.io.FileOutputStream;
 
 public class Cliente_B {
 	private static final String HOST = "localhost";
@@ -17,8 +21,7 @@ public class Cliente_B {
 		try (SocketChannel client = SocketChannel.open()) {
 			client.connect(new InetSocketAddress(HOST, PORT));
 			System.out.println("Conectado al servidor " + safeRemoteAddress(client));
-			// incluir opción 7 en la ayuda inicial
-			System.out.println("Escribe una opción (1-7) o 'salir'. (5 o 'salir' cierra la conexión). El servidor mostrará el menú al conectarte.");
+			System.out.println("Escribe una opción (1-6) o 'salir'. (5 o 'salir' cierra la conexión). Puedes usar /sendfile <ruta> o /priv <id> <msg>");
 
 			// Nuevo: cola para recibir líneas desde el hilo lector
 			BlockingQueue<String> incoming = new LinkedBlockingQueue<>();
@@ -31,79 +34,34 @@ public class Cliente_B {
 
 			BufferedReader console = new BufferedReader(new InputStreamReader(System.in));
 			String line;
+			
 			while ((line = console.readLine()) != null) {
-				String opt = line.trim();
-				switch (opt.toLowerCase()) {
-					case "1":
-						System.out.println("DEBUG: Opción seleccionada -> 1 (Listar usuarios)");
-						break;
-					case "2":
-						System.out.println("DEBUG: Opción seleccionada -> 2 (Listar chats públicos)");
-						break;
-					case "3":
-						System.out.println("DEBUG: Opción seleccionada -> 3 (Crear chat grupal)");
-						break;
-					case "4":
-						System.out.println("DEBUG: Opción seleccionada -> 4 (Listar mis chats / Entrar)");
-						break;
-					case "6":
-						System.out.println("DEBUG: Opción seleccionada -> 6 (Salir de chat grupal)");
-						break;
-					case "7":
-						System.out.println("DEBUG: Opción seleccionada -> 7 (Enviar mensaje privado a usuario)");
-						break;
-					case "5":
-						System.out.println("DEBUG: Opción seleccionada -> 5 (Salir del servidor)");
-						break;
-					case "salir":
-						System.out.println("DEBUG: Comando textual -> salir (cerrar cliente)");
-						break;
-					default:
-						if ("men0".equalsIgnoreCase(opt)) {
-							System.out.println("DEBUG: Comando de chat -> MEN0 (volver al menú)");
-						} else if ("priv0".equalsIgnoreCase(opt)) {
-							System.out.println("DEBUG: Comando de chat -> PRIV0 (iniciar chat privado con miembro del grupo)");
-						} else {
-							System.out.println("DEBUG: Mensaje libre/entrada -> " + opt);
-						}
-						break;
+				
+				// 1. Detección y codificación de archivos
+				if (line.trim().toLowerCase().startsWith("/sendfile ")) {
+					
+					String filePath = line.trim().substring(10).trim();
+					line = processAndEncodeFile(filePath); 
+					
+					if (line.startsWith("ERROR")) {
+						System.err.println("Error al procesar archivo: " + line.substring(6));
+						continue; // No enviamos nada si hay error
+					}
+					
+					System.out.println("DEBUG: Preparando para enviar archivo codificado. Tamaño de mensaje: " + line.length() + " caracteres.");
 				}
-
-				// enviar al servidor
+				
+				// 2. Mensaje de debug simple
+				System.out.println("DEBUG: Enviando entrada -> " + line.trim());
+				
+				// 3. Enviar al servidor
 				String toSend = line + "\n";
 				ByteBuffer out = ByteBuffer.wrap(toSend.getBytes(StandardCharsets.UTF_8));
 				while (out.hasRemaining()) {
 					client.write(out);
 				}
 
-				// Después de enviar una opción, recoger líneas entrantes durante un tiempo
-				// para detectar si el servidor indica que entramos al chat o muestra el menú.
-				String collected = collectUntilMatch(incoming, new String[] {
-						"Entrando al chat", "te has unido", "chat creado", "Escribe una opción"
-				}, 5000);
-
-				// Si detectamos que entramos al chat, cambiar a modo chat inmediatamente.
-				if (collected != null && (collected.toLowerCase().contains("entrando al chat")
-						|| collected.toLowerCase().contains("te has unido")
-						|| collected.toLowerCase().contains("chat creado"))) {
-					System.out.println("DEBUG: entrando en modo CHAT. Escribe MEN0 para salir del chat.");
-					// modo chat: el hilo lector seguirá imprimiendo broadcasts en tiempo real.
-					while ((line = console.readLine()) != null) {
-						System.out.println("DEBUG[chat] enviando -> " + line);
-						String toSendMsg = line + "\n";
-						ByteBuffer outMsg = ByteBuffer.wrap(toSendMsg.getBytes(StandardCharsets.UTF_8));
-						while (outMsg.hasRemaining()) client.write(outMsg);
-						// si es MEN0, esperar a que servidor reenvíe el menú y salir del modo chat
-						if ("MEN0".equalsIgnoreCase(line.trim())) {
-							collectUntilMatch(incoming, new String[] { "Escribe una opción" }, 5000);
-							System.out.println("DEBUG: volvemos al menu (ver líneas anteriores)");
-							break;
-						}
-						// no se bloquea para leer broadcasts: reader thread los imprimirá automáticamente
-					}
-				}
-
-				// cerrar cliente sólo si envía 5 o 'salir'
+				// 4. Cerrar cliente si es necesario
 				if ("salir".equalsIgnoreCase(line.trim()) || "5".equals(line.trim())) {
 					System.out.println("Has solicitado salir. Cerrando conexión...");
 					break;
@@ -119,11 +77,38 @@ public class Cliente_B {
 			System.err.println("No se pudo conectar: " + e.getMessage());
 		}
 	}
+    
+   //Métodos de soporte para el cliente
+
+	// Metodo para leer, codificar y generar el protocolo /file
+	private static String processAndEncodeFile(String filePath) {
+		try {
+			File file = new File(filePath);
+			if (!file.exists()) {
+				return "ERROR: Archivo no encontrado en la ruta: " + filePath;
+			}
+			if (file.length() > 2097152) { // Limitar a 2MB
+				return "ERROR: El archivo es demasiado grande (Máx. 2MB).";
+			}
+			
+			// 1. Leer bytes del archivo
+			byte[] fileBytes = Files.readAllBytes(file.toPath());
+			
+			// 2. Codificar los bytes a Base64
+			String base64Content = Base64.getEncoder().encodeToString(fileBytes);
+			
+			// 3. Devolver la línea de protocolo para el Servidor: /file <nombre> <contenido>
+			return "/file " + file.getName() + " " + base64Content;
+			
+		} catch (IOException e) {
+			return "ERROR: Falló la lectura/codificación: " + e.getMessage();
+		}
+	}
 
 	// Nuevo: hilo lector que imprime cada línea recibida y la encola
 	private static Thread startReaderThread(SocketChannel client, BlockingQueue<String> incoming) {
 		Thread t = new Thread(() -> {
-			ByteBuffer buf = ByteBuffer.allocate(2048);
+			ByteBuffer buf = ByteBuffer.allocate(4096); // Aumentar buffer
 			StringBuilder sb = new StringBuilder();
 			try {
 				while (!Thread.currentThread().isInterrupted()) {
@@ -139,7 +124,41 @@ public class Cliente_B {
 						while ((idx = sb.indexOf("\n")) != -1) {
 							String line = sb.substring(0, idx).trim();
 							sb.delete(0, idx + 1);
-							System.out.println("Servidor: " + line);
+							
+							
+							// LÓGICA DE RECEPCIÓN Y DECODIFICACIÓN DE ARCHIVOS 
+							
+							if (line.startsWith("FILE_INCOMING|")) {
+								
+								// 1. Descomponer el protocolo: FILE_INCOMING|<sender>|<name>|<base64>
+								String[] parts = line.substring(14).split("\\|", 3);
+								if (parts.length == 3) {
+									String senderName = parts[0];
+									String fileName = parts[1];
+									String base64Content = parts[2];
+									
+									// 2. Decodificar Base64 a bytes
+									byte[] fileBytes = Base64.getDecoder().decode(base64Content);
+									
+									// 3. Guardar el archivo
+									try (FileOutputStream fos = new FileOutputStream("RECEIVED_" + fileName)) {
+										fos.write(fileBytes);
+										System.out.println("\n--- ARCHIVO RECIBIDO ---");
+										System.out.println("De: " + senderName);
+										System.out.println("Guardado como: RECEIVED_" + fileName + " (Tamaño: " + fileBytes.length / 1024 + " KB)");
+										System.out.println("------------------------\nEscribe entrada ->");
+										
+									} catch (IOException e) {
+										System.err.println("Error al guardar archivo: " + e.getMessage());
+									}
+								}
+								
+							} else {
+								// Mensajes de chat normales y comandos del servidor
+								System.out.println("Servidor: " + line);
+							}
+							// ==========================================================
+							
 							// intentar encolar sin bloquear indefinidamente
 							incoming.offer(line);
 						}
@@ -155,7 +174,6 @@ public class Cliente_B {
 	}
 
 	// Nuevo: recoge líneas desde la cola hasta encontrar alguna que coincida con algún patrón
-	// o hasta timeout (ms). Devuelve las líneas concatenadas que se hayan colectado (puede ser "")
 	private static String collectUntilMatch(BlockingQueue<String> incoming, String[] patterns, long timeoutMs) {
 		StringBuilder sb = new StringBuilder();
 		long deadline = System.currentTimeMillis() + timeoutMs;
@@ -177,6 +195,7 @@ public class Cliente_B {
 		return sb.length() > 0 ? sb.toString() : null;
 	}
 
+	// Método auxiliar para direcciones
 	private static String safeRemoteAddress(SocketChannel ch) {
 		try {
 			return ch.getRemoteAddress().toString();
