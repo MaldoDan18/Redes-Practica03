@@ -36,15 +36,10 @@ public class Servidor_B {
 	private static final String S_AWAIT_CREATE_NAME = "AWAIT_CREATE_NAME";
 	private static final String S_AWAIT_ENTER_CHAT = "AWAIT_ENTER_CHAT";
 	private static final String S_AWAIT_LEAVE_CHAT = "AWAIT_LEAVE_CHAT";
-	// Nuevo: esperar id para chat privado
-	private static final String S_AWAIT_PRIVATE_ID = "AWAIT_PRIVATE_ID";
 	private static final String S_IN_CHAT = "IN_CHAT";
 
 	// Map de id usuario -> socket (si está conectado)
 	private static final Map<Integer, SocketChannel> userIdToSocket = new HashMap<>();
-
-	// Nuevo: map que guarda cuántos mensajes ha leído cada usuario por chat (chatName -> (userId -> countLeidos))
-	private static final Map<String, Map<Integer, Integer>> lastReadMap = new HashMap<>();
 
 	private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HH:mm:ss");
 
@@ -145,7 +140,7 @@ public class Servidor_B {
 						read = -1;
 					}
 					if (read == -1) {
-						cleanupChannel(ch, key, readMap, writeMap, selector);
+						cleanupChannel(ch, key, readMap, writeMap);
 						continue;
 					} else if (read > 0) {
 						tmp.flip();
@@ -159,47 +154,93 @@ public class Servidor_B {
 							sb.delete(0, idx + 1);
 							System.out.println("[" + safeRemoteAddress(ch) + "] " + line);
 
+							// obtener usuario asociado al socket
 							Usuario usuario = socketToUsuario.get(ch);
 							String state = pendingState.getOrDefault(ch, S_IDLE);
 
 							// Flujos interactivos primera prioridad
 							// Si está en modo de chat activo, tratamos las líneas como mensajes de chat
 							if (S_IN_CHAT.equals(state)) {
-								// MEN0 = volver al menu, no reenviar
-								if ("MEN0".equalsIgnoreCase(line.trim())) {
-									// quitar temp para que deje de recibir broadcasts
-									pendingState.put(ch, S_IDLE);
-									pendingTemp.remove(ch);
-									enqueueWrite(ch, writeMap, ByteBuffer.wrap(("Saliendo del chat. " + menuTexto()).getBytes(charset)));
-								} else if ("PRIV0".equalsIgnoreCase(line.trim())) {
-									// iniciar flujo para crear chat privado desde el chat grupal actual
-									String currentChat = pendingTemp.get(ch);
-									if (currentChat != null) {
-										Chat_Grupal current = null;
-										for (Chat_Grupal c : chats) if (c.getNombre().equalsIgnoreCase(currentChat)) { current = c; break; }
-										if (current != null) {
-											// listar miembros en linea (excepto el propio)
-											StringBuilder out = new StringBuilder();
-											out.append("Miembros activos en ").append(current.getNombre()).append(" (id - nombre):\n");
-											for (Usuario m : current.getMiembros()) {
-												SocketChannel sck = userIdToSocket.get(m.getId());
-												if (m.getId() != usuario.getId() && sck != null && sck.isOpen()) {
-													out.append(m.getId()).append(" - ").append(m.getNombre()).append("\n");
-												}
+								// 1. Lógica de Mensaje Privado (/priv)
+								if (line.toLowerCase().startsWith("/priv ")) {
+									String[] parts = line.substring(6).trim().split("\\s+", 2);
+									if (parts.length == 2) {
+										try {
+											int destId = Integer.parseInt(parts[0]);
+											String privMsg = parts[1];
+											
+											// Encontrar el SocketChannel del destinatario usando el ID
+											SocketChannel destCh = userIdToSocket.get(destId);
+											Usuario destUser = listaUsuarios.getUsuarioPorId(destId);
+											
+											if (destCh != null && destCh.isOpen() && destUser != null) {
+												// Mensaje que verá el DESTINATARIO
+												String time = LocalTime.now().format(TIME_FMT);
+												String msgForDest = "[PRIVADO de " + usuario.getNombre() + " - " + time + "] : " + privMsg;
+												
+												// Enviar al DESTINATARIO
+												enqueueWrite(destCh, writeMap, ByteBuffer.wrap((msgForDest + "\n").getBytes(charset)));
+												SelectionKey sk = destCh.keyFor(selector);
+												if (sk != null) sk.interestOps(sk.interestOps() | SelectionKey.OP_WRITE);
+												
+												// Mensaje de confirmación que verá el EMISOR
+												String confirmation = "[PRIVADO a " + destUser.getNombre() + "] Enviado.";
+												enqueueWrite(ch, writeMap, ByteBuffer.wrap((confirmation + "\n").getBytes(charset)));
+											} else {
+												enqueueWrite(ch, writeMap, ByteBuffer.wrap(("Error: ID " + destId + " no encontrado o no conectado.\n").getBytes(charset)));
 											}
-											out.append("Escribe el ID del usuario para crear chat privado:\n");
-											enqueueWrite(ch, writeMap, ByteBuffer.wrap(out.toString().getBytes(charset)));
-											// marcar que estamos esperando ID para privado, y guardar origen para filtrar
-											pendingState.put(ch, S_AWAIT_PRIVATE_ID);
-											pendingTemp.put(ch, "FROMCHAT:" + current.getNombre());
-										} else {
-											enqueueWrite(ch, writeMap, ByteBuffer.wrap(("Chat no disponible: " + currentChat + "\n").getBytes(charset)));
+											
+										} catch (NumberFormatException e) {
+											enqueueWrite(ch, writeMap, ByteBuffer.wrap("Error: Formato incorrecto. Uso: /priv <ID> <mensaje>\n".getBytes(charset)));
 										}
 									} else {
-										enqueueWrite(ch, writeMap, ByteBuffer.wrap("No hay chat activo para PRIV0.\n".getBytes(charset)));
+										enqueueWrite(ch, writeMap, ByteBuffer.wrap("Error: Uso: /priv <ID> <mensaje>\n".getBytes(charset)));
 									}
+								}
+								
+								// 2. Lógica de Envío de Archivo (/file)
+								else if (line.toLowerCase().startsWith("/file ")) {
+									String fileDataLine = line.substring(6).trim();
+									String[] parts = fileDataLine.split("\\s+", 2);
+
+									if (parts.length == 2) {
+										String fileName = parts[0];
+										String base64Content = parts[1];
+										
+										// PROTOCOLO DE RECEPCIÓN: FILE_INCOMING|<sender>|<name>|<base64>
+										String protocolMsg = "FILE_INCOMING|" + usuario.getNombre() + "|" + fileName + "|" + base64Content; 
+
+										// Difundir el mensaje de archivo a TODOS los miembros del chat.
+										String chatName = pendingTemp.get(ch);
+										if (chatName != null) {
+											Chat_Grupal current = null;
+											for (Chat_Grupal c : chats) if (c.getNombre().equalsIgnoreCase(chatName)) { current = c; break; }
+											if (current != null) {
+												// Notificar a todos los miembros del chat 
+												for (Usuario member : current.getMiembros()) {
+													SocketChannel dest = userIdToSocket.get(member.getId());
+													if (dest != null && dest.isOpen()) {
+														// Enviamos el mensaje de protocolo de recepción (FILE_INCOMING)
+														enqueueWrite(dest, writeMap, ByteBuffer.wrap((protocolMsg + "\n").getBytes(charset)));
+														SelectionKey sk = dest.keyFor(selector);
+														if (sk != null) sk.interestOps(sk.interestOps() | SelectionKey.OP_WRITE);
+													}
+												}
+											} else {
+												enqueueWrite(ch, writeMap, ByteBuffer.wrap(("Error: No estás en un chat activo.\n").getBytes(charset)));
+											}
+										}
+									} else {
+										enqueueWrite(ch, writeMap, ByteBuffer.wrap("Error: Uso: /file <nombre_archivo> <contenido_base64>\n".getBytes(charset)));
+									}
+								}
+								
+								// 3. Lógica para volver al menú (MEN0)
+								else if ("MEN0".equalsIgnoreCase(line.trim())) {
+									pendingState.put(ch, S_IDLE);
+									enqueueWrite(ch, writeMap, ByteBuffer.wrap(("Saliendo del chat. " + menuTexto()).getBytes(charset)));
 								} else {
-									// obtener chat actual del pendingTemp
+									// Lógica de difusión Grupal (Mensaje normal)
 									String chatName = pendingTemp.get(ch);
 									if (chatName != null) {
 										Chat_Grupal current = null;
@@ -209,15 +250,18 @@ public class Servidor_B {
 											String msg = usuario.getNombre() + " - [" + time + "] : " + line;
 											// Guardar en historial (sin \n)
 											current.addMessage(msg);
-											// difundir a todos los miembros conectados:
+											// difundir a todos los miembros conectados (incluye emisor)
 											for (Usuario member : current.getMiembros()) {
 												SocketChannel dest = userIdToSocket.get(member.getId());
-												sendOrNotify(dest, member.getId(), chatName, msg, writeMap, charset, selector);
+												if (dest != null && dest.isOpen()) {
+													enqueueWrite(dest, writeMap, ByteBuffer.wrap((msg + "\n").getBytes(charset)));
+													SelectionKey sk = dest.keyFor(selector);
+													if (sk != null) sk.interestOps(sk.interestOps() | SelectionKey.OP_WRITE);
+												}
 											}
 										} else {
 											enqueueWrite(ch, writeMap, ByteBuffer.wrap(("Chat no disponible: " + chatName + "\n").getBytes(charset)));
 											pendingState.put(ch, S_IDLE);
-											pendingTemp.remove(ch);
 										}
 									} else {
 										enqueueWrite(ch, writeMap, ByteBuffer.wrap("No hay chat activo.\n".getBytes(charset)));
@@ -258,27 +302,19 @@ public class Servidor_B {
 								if (usuario != null) nuevoChat.agregarMiembro(usuario);
 								chats.add(nuevoChat);
 
-								// inicializar lastReadMap para este chat (todos con 0 ledos)
-								synchronized (lastReadMap) {
-									lastReadMap.put(nuevoChat.getNombre(), new HashMap<>());
-									for (Usuario m : nuevoChat.getMiembros()) {
-										lastReadMap.get(nuevoChat.getNombre()).put(m.getId(), 0);
-									}
-								}
-
-								// Entrar automáticamente al chat creado: marcar estado ANTES de notificar
-								pendingState.put(ch, S_IN_CHAT);
-								pendingTemp.put(ch, chatName);
-
 								// Notificar historial (nuevo chat vacío) y notificaciones de unión
-								// Crear notificación de unión del creador y añadirla al historial
+								// Crear notificación de unión del creador
 								String joinNotif = (usuario != null ? usuario.getNombre() : "usuario") + " se unió al chat";
+								// Guardar en historial
 								nuevoChat.addMessage(joinNotif);
-
-								// Enviar notificación/mensaje a miembros usando helper
+								// Enviar notificación a miembros conectados
 								for (Usuario member : nuevoChat.getMiembros()) {
 									SocketChannel dest = userIdToSocket.get(member.getId());
-									sendOrNotify(dest, member.getId(), nuevoChat.getNombre(), joinNotif, writeMap, charset, selector);
+									if (dest != null && dest.isOpen()) {
+										enqueueWrite(dest, writeMap, ByteBuffer.wrap((joinNotif + "\n").getBytes(charset)));
+										SelectionKey sk = dest.keyFor(selector);
+										if (sk != null) sk.interestOps(sk.interestOps() | SelectionKey.OP_WRITE);
+									}
 								}
 
 								StringBuilder out = new StringBuilder();
@@ -288,6 +324,9 @@ public class Servidor_B {
 								}
 								out.append("Entrando al chat. Para volver al menu escribe MEN0\n");
 								enqueueWrite(ch, writeMap, ByteBuffer.wrap(out.toString().getBytes(charset)));
+								// entrar automáticamente al chat creado
+								pendingState.put(ch, S_IN_CHAT);
+								pendingTemp.put(ch, chatName);
 								SelectionKey ck = ch.keyFor(selector);
 								if (ck != null) ck.interestOps(ck.interestOps() | SelectionKey.OP_WRITE);
 								continue;
@@ -297,35 +336,13 @@ public class Servidor_B {
 								Chat_Grupal target = null;
 								for (Chat_Grupal c : chats) if (c.getNombre().equalsIgnoreCase(chatName)) { target = c; break; }
 								if (target != null && usuario != null) {
-									// agregar miembro
 									target.agregarMiembro(usuario);
 
-									// asegurar que existan entradas en lastReadMap
-									synchronized (lastReadMap) {
-										lastReadMap.putIfAbsent(target.getNombre(), new HashMap<>());
-										lastReadMap.get(target.getNombre()).putIfAbsent(usuario.getId(), 0);
-									}
-
-									// 1) ENVIAR LOS MENSAJES NO LEDOS (solo esos)
+									// 1) Enviar inmediatamente el historial al cliente que entra
 									List<String> history = target.getHistory();
-									int total = history.size();
-									int lastRead = 0;
-									synchronized (lastReadMap) {
-										Map<Integer,Integer> m = lastReadMap.get(target.getNombre());
-										if (m != null) lastRead = m.getOrDefault(usuario.getId(), 0);
-									}
-									int unread = Math.max(0, total - lastRead);
-									if (unread > 0) {
-										enqueueWrite(ch, writeMap, ByteBuffer.wrap(("Notificación: " + unread + " mensaje(s) no leidos en " + target.getNombre() + "\n").getBytes(charset)));
-										// enviar solo mensajes desde lastRead hasta total-1
-										for (int i = lastRead; i < total; i++) {
-											String h = history.get(i);
+									if (!history.isEmpty()) {
+										for (String h : history) {
 											enqueueWrite(ch, writeMap, ByteBuffer.wrap((h + "\n").getBytes(charset)));
-										}
-										// marcar como ledos hasta total (aún falta la notificación de unión que vendrá)
-										synchronized (lastReadMap) {
-											Map<Integer,Integer> m = lastReadMap.get(target.getNombre());
-											if (m != null) m.put(usuario.getId(), total);
 										}
 									}
 
@@ -341,7 +358,11 @@ public class Servidor_B {
 									target.addMessage(joinNotif);
 									for (Usuario member : target.getMiembros()) {
 										SocketChannel dest = userIdToSocket.get(member.getId());
-										sendOrNotify(dest, member.getId(), target.getNombre(), joinNotif, writeMap, charset, selector);
+										if (dest != null && dest.isOpen()) {
+											enqueueWrite(dest, writeMap, ByteBuffer.wrap((joinNotif + "\n").getBytes(charset)));
+											SelectionKey sk = dest.keyFor(selector);
+											if (sk != null) sk.interestOps(sk.interestOps() | SelectionKey.OP_WRITE);
+										}
 									}
 
 									// 4) Informar al que entró y poner estado IN_CHAT
@@ -351,7 +372,7 @@ public class Servidor_B {
 									out.append("Entrando al chat. Para volver al menu escribe MEN0\n");
 									enqueueWrite(ch, writeMap, ByteBuffer.wrap(out.toString().getBytes(charset)));
 
-									// poner estado IN_CHAT y pendingTemp (ya se actualizó lastRead arriba)
+									// poner estado IN_CHAT
 									pendingState.put(ch, S_IN_CHAT);
 									pendingTemp.put(ch, target.getNombre());
 								} else {
@@ -370,11 +391,15 @@ public class Servidor_B {
 								if (target != null && usuario != null) {
 									target.eliminarMiembro(usuario);
 									String leaveNotif = usuario.getNombre() + " ha salido del chat";
-									// guardar en historial y notificar usando helper
+									// guardar en historial y notificar
 									target.addMessage(leaveNotif);
 									for (Usuario member : target.getMiembros()) {
 										SocketChannel dest = userIdToSocket.get(member.getId());
-										sendOrNotify(dest, member.getId(), target.getNombre(), leaveNotif, writeMap, charset, selector);
+										if (dest != null && dest.isOpen()) {
+											enqueueWrite(dest, writeMap, ByteBuffer.wrap((leaveNotif + "\n").getBytes(charset)));
+											SelectionKey sk = dest.keyFor(selector);
+											if (sk != null) sk.interestOps(sk.interestOps() | SelectionKey.OP_WRITE);
+										}
 									}
 									enqueueWrite(ch, writeMap, ByteBuffer.wrap(("Has salido de " + target.getNombre() + "\n").getBytes(charset)));
 								} else {
@@ -416,9 +441,8 @@ public class Servidor_B {
 									enqueueWrite(ch, writeMap, ByteBuffer.wrap("No hay chats disponibles.\n".getBytes(charset)));
 								} else {
 									StringBuilder out = new StringBuilder();
-									out.append("Chats públicos:\n");
+									out.append("Chats:\n");
 									for (Chat_Grupal c : chats) {
-										if (c.isPrivado()) continue; // ocultar privados en listado público
 										out.append("- ").append(c.getNombre()).append(" (miembros: ").append(c.getMiembros().size()).append(")\n");
 									}
 									enqueueWrite(ch, writeMap, ByteBuffer.wrap(out.toString().getBytes(charset)));
@@ -437,6 +461,7 @@ public class Servidor_B {
 								pendingState.put(ch, S_AWAIT_CREATE_IDS);
 								SelectionKey ck = ch.keyFor(selector);
 								if (ck != null) ck.interestOps(ck.interestOps() | SelectionKey.OP_WRITE);
+								continue;
 							} else if ("4".equals(line)) {
 								// Listar los chats a los que pertenece y pedir nombre para entrar
 								if (usuario == null) {
@@ -454,18 +479,14 @@ public class Servidor_B {
 								}
 								SelectionKey ck = ch.keyFor(selector);
 								if (ck != null) ck.interestOps(ck.interestOps() | SelectionKey.OP_WRITE);
+								continue;
 							} else if ("6".equals(line)) {
 								// Salir de un chat grupal: pedir nombre
 								enqueueWrite(ch, writeMap, ByteBuffer.wrap("Escribe el nombre del chat del que quieres salir:\n".getBytes(charset)));
 								pendingState.put(ch, S_AWAIT_LEAVE_CHAT);
 								SelectionKey ck = ch.keyFor(selector);
 								if (ck != null) ck.interestOps(ck.interestOps() | SelectionKey.OP_WRITE);
-							} else if ("7".equals(line)) {
-								// Enviar mensaje privado: pedir ID de usuario
-								enqueueWrite(ch, writeMap, ByteBuffer.wrap("Escribe el ID del usuario al que quieres enviar un mensaje privado:\n".getBytes(charset)));
-								pendingState.put(ch, S_AWAIT_PRIVATE_ID);
-								SelectionKey ck = ch.keyFor(selector);
-								if (ck != null) ck.interestOps(ck.interestOps() | SelectionKey.OP_WRITE);
+								continue;
 							} else {
 								// eco simple y volver a enviar menú
 								String resp = "Recibido: " + line + "\n" + menuTexto();
@@ -500,7 +521,7 @@ public class Servidor_B {
 							}
 						}
 					} catch (IOException e) {
-						cleanupChannel(ch, key, readMap, writeMap, selector);
+						cleanupChannel(ch, key, readMap, writeMap);
 						continue;
 					}
 					if (q == null || q.isEmpty()) {
@@ -510,14 +531,13 @@ public class Servidor_B {
 						} catch (CancelledKeyException ignored) {}
 					}
 					if (closeAfter) {
-						cleanupChannel(ch, key, readMap, writeMap, selector);
+						cleanupChannel(ch, key, readMap, writeMap);
 					}
 				}
 			}
 		}
 	}
 
-	// Ajuste: agregar opción 7 al texto del menú
 	private static String menuTexto() {
 		StringBuilder m = new StringBuilder();
 		m.append("Menu:\n");
@@ -526,7 +546,6 @@ public class Servidor_B {
 		m.append("3 - Crear chat grupal\n");
 		m.append("4 - Listar mis chats y entrar\n");
 		m.append("6 - Salir de chat grupal\n");
-		m.append("7 - Enviar mensaje privado a usuario (nuevo)\n");
 		m.append("5 - Salir\n");
 		m.append("Escribe una opción:\n");
 		return m.toString();
@@ -541,7 +560,7 @@ public class Servidor_B {
 		q.add(buf);
 	}
 
-	private static void cleanupChannel(SocketChannel ch, SelectionKey key, Map<SocketChannel, StringBuilder> readMap, Map<SocketChannel, Queue<ByteBuffer>> writeMap, Selector selector) {
+	private static void cleanupChannel(SocketChannel ch, SelectionKey key, Map<SocketChannel, StringBuilder> readMap, Map<SocketChannel, Queue<ByteBuffer>> writeMap) {
 		try {
 			System.out.println("Cerrando canal: " + safeRemoteAddress(ch));
 			if (key != null) key.cancel();
@@ -559,8 +578,9 @@ public class Servidor_B {
 					for (Usuario member : c.getMiembros()) {
 						SocketChannel dest = userIdToSocket.get(member.getId());
 						if (dest != null && dest.isOpen()) {
-							// usar helper para respetar lastRead / in-chat
-							sendOrNotify(dest, member.getId(), c.getNombre(), off, writeMap, StandardCharsets.UTF_8, selector);
+							enqueueWrite(dest, writeMap, ByteBuffer.wrap((off + "\n").getBytes(StandardCharsets.UTF_8)));
+							SelectionKey sk = dest.keyFor(key.selector());
+							if (sk != null) sk.interestOps(sk.interestOps() | SelectionKey.OP_WRITE);
 						}
 					}
 				}
@@ -578,49 +598,6 @@ public class Servidor_B {
 			return ch.getRemoteAddress().toString();
 		} catch (IOException e) {
 			return "desconocido";
-		}
-	}
-
-	// Helper: envía el mensaje completo si el destinatario está actualmente dentro del chat,
-	// en caso contrario actualiza lastReadMap y envía una notificación con la cuenta.
-	private static void sendOrNotify(SocketChannel dest, int memberId, String chatName, String fullMsg, Map<SocketChannel, Queue<ByteBuffer>> writeMap, Charset charset, Selector selector) {
-		// localizar el chat para obtener historial total
-		Chat_Grupal target = null;
-		for (Chat_Grupal c : chats) if (c.getNombre().equalsIgnoreCase(chatName)) { target = c; break; }
-		int total = 0;
-		if (target != null) total = target.getHistory().size();
-
-		// destinatario conectado y en el chat?
-		if (dest != null && dest.isOpen()) {
-			String destState = pendingState.get(dest);
-			String destChat = pendingTemp.get(dest);
-			if (S_IN_CHAT.equals(destState) && destChat != null && destChat.equalsIgnoreCase(chatName)) {
-				enqueueWrite(dest, writeMap, ByteBuffer.wrap((fullMsg + "\n").getBytes(charset)));
-				// marcar como leídos hasta total (incluye el mensaje ya añadido al historial)
-				synchronized (lastReadMap) {
-					lastReadMap.putIfAbsent(chatName, new HashMap<>());
-					lastReadMap.get(chatName).put(memberId, total);
-				}
-				SelectionKey sk = dest.keyFor(selector);
-				if (sk != null) sk.interestOps(sk.interestOps() | SelectionKey.OP_WRITE);
-				return;
-			}
-		}
-
-		// no está "viendo" el chat: calcular cantidad no leída y enviar notificación
-		synchronized (lastReadMap) {
-			lastReadMap.putIfAbsent(chatName, new HashMap<>());
-			Map<Integer,Integer> counts = lastReadMap.get(chatName);
-			int lastRead = counts.getOrDefault(memberId, 0);
-			int unread = Math.max(0, total - lastRead);
-			// si el destinatario está conectado, enviar notificación con la cuenta actual
-			SocketChannel d = userIdToSocket.get(memberId);
-			if (d != null && d.isOpen()) {
-				String note = "Notificación: " + unread + " mensaje(s) nuevo(s) en " + chatName;
-				enqueueWrite(d, writeMap, ByteBuffer.wrap((note + "\n").getBytes(charset)));
-				SelectionKey sk = d.keyFor(selector);
-				if (sk != null) sk.interestOps(sk.interestOps() | SelectionKey.OP_WRITE);
-			}
 		}
 	}
 }
