@@ -5,7 +5,7 @@
  * El chat grupal permite a los usuarios enviar mensajes a todos los miembros conectados.
  * El chat privado permite a los usuarios enviar mensajes directos a otros usuarios específicos.
  */
- 
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -15,28 +15,15 @@ public class Chat_Grupal {
     private final List<Usuario> miembros;
     // Nuevo: historial de mensajes (mensajes ya formateados)
     private final List<String> history;
-    // Nuevo: marca si el chat es privado (entre dos usuarios)
-    private final boolean privado;
 
-    // constructor para grupal (por compatibilidad)
     public Chat_Grupal(String nombre) {
-        this(nombre, false);
-    }
-
-    // nuevo constructor que permite indicar privado
-    public Chat_Grupal(String nombre, boolean privado) {
         this.nombre = nombre;
         this.miembros = new ArrayList<>();
         this.history = new ArrayList<>();
-        this.privado = privado;
     }
 
     public String getNombre() {
         return nombre;
-    }
-
-    public boolean isPrivado() {
-        return privado;
     }
 
     public synchronized void agregarMiembro(Usuario u) {
