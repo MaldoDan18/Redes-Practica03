@@ -135,7 +135,7 @@ public class Cliente_B {
 								if (parts.length == 3) {
 									String senderName = parts[0];
 									String fileName = parts[1];
-									String base64Content = parts[2];
+									String base64Content = parts[2].trim().replaceAll("\\s", "").replaceAll("[^a-zA-Z0-9+/=]", "");
 									
 									// 2. Decodificar Base64 a bytes
 									byte[] fileBytes = Base64.getDecoder().decode(base64Content);
