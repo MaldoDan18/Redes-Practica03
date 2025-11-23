@@ -204,8 +204,8 @@ public class Servidor_B {
 									String[] parts = fileDataLine.split("\\s+", 2);
 
 									if (parts.length == 2) {
-										String fileName = parts[0];
-										String base64Content = parts[1];
+										String fileName = parts[0].trim();
+										String base64Content = parts[1].trim();
 										
 										// PROTOCOLO DE RECEPCIÓN: FILE_INCOMING|<sender>|<name>|<base64>
 										String protocolMsg = "FILE_INCOMING|" + usuario.getNombre() + "|" + fileName + "|" + base64Content; 
