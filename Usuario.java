@@ -74,3 +74,4 @@ public class Usuario {
         return Objects.hash(id);
     }
 }
+
